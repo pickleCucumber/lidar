@@ -1,97 +1,91 @@
+#!/usr/bin/env python3
+import serial
 import struct
 import csv
+import time
+import math
+from datetime import datetime
 
+SERIAL_PORT = '/dev/serial0'   
+BAUDRATE = 230400
+HEADER = 0x54
+PACKET_SIZE = 48
+POINTS_PER_PACKET = 12
 
-PACKET_SIZE = 42   
-HEADER_BYTE = 0xFA 
-FIELDS = [
-    ("header", "B"),        # 1 байт, должен быть 0xFA
-    ("index", "B"),         # 1 байт, индекс пакета 
-    ("speed", "H"),         # 2 байта, скорость вращения (0.1 градуса/сек?)
-    ("start_angle", "H"),   # 2 байта, начальный угол (0.01 градуса?)
-    ("distances", "12H"),   # 12*2=24 байта, 12 расстояний (по 2 байта каждое)
-    ("intensities", "12B"), # 12*1=12 байт, интенсивность для каждого луча
-]
+def parse_packet(packet):
+    """
+    Распаковывает пакет LD06.
+    Возвращает список словарей: [{'angle': float_deg, 'dist': int_mm, 'intens': int}, ...]
+    """
+    if packet[0] != HEADER:
+        return []
+    # Структура (little-endian):
+    # [0] header (0x54)
+    # [1] ver_len (младшие 5 бит = длина данных = 12*3 = 36)
+    # [2:4] speed (0.01 град/с)
+    # [4:6] start_angle (0.01 град)
+    # [6:42] 12 точек по 3 байта: расстояние (2 байта, мм), интенсивность (1 байт)
+    # [42:44] end_angle (0.01 град)
+    # [44:46] timestamp (мс)
+    # [46] crc8
+    start_angle = struct.unpack('<H', packet[4:6])[0] / 100.0   # градусы
+    end_angle   = struct.unpack('<H', packet[42:44])[0] / 100.0
+    # Обработка перехода через 0° (end_angle может быть меньше start_angle)
+    if end_angle < start_angle:
+        end_angle += 360.0
+    angle_step = (end_angle - start_angle) / (POINTS_PER_PACKET - 1) if POINTS_PER_PACKET > 1 else 0
 
-def parse_packet(data):
-    """пакет согласно структуре FIELDS."""
-    offset = 0
-    result = {}
-    for name, fmt in FIELDS:
-        size = struct.calcsize(fmt)
-        values = struct.unpack_from(f"<{fmt}", data, offset)  # little-endian
-        offset += size
-        if len(values) == 1:
-            result[name] = values[0]
-        else:
-            result[name] = values
-    return result
+    points = []
+    for i in range(POINTS_PER_PACKET):
+        offset = 6 + i * 3
+        dist = struct.unpack('<H', packet[offset:offset+2])[0]
+        intens = packet[offset+2]
+        angle = start_angle + i * angle_step
+        # Нормализуем угол в [0, 360)
+        angle = angle % 360.0
+        points.append({
+            'angle': angle,
+            'dist': dist,
+            'intens': intens
+        })
+    return points
 
 def main():
-    filename = input("Введите имя .bin файла: ").strip()
-    if not filename:
-        filename = "lidar_data_20260607_005132.bin" 
-    
-    with open(filename, "rb") as f:
-        raw = f.read()
-    
-    print(f"Размер файла: {len(raw)} байт")
-    print(f"Ожидаемое количество пакетов (по {PACKET_SIZE} байт): {len(raw) // PACKET_SIZE}")
-    
-    packets = []
-    i = 0
-    while i <= len(raw) - PACKET_SIZE:
-        if raw[i] == HEADER_BYTE:
-            packet_data = raw[i:i+PACKET_SIZE]
-            packets.append(packet_data)
-            i += PACKET_SIZE
-        else:
-            i += 1
-    
-    print(f"Найдено валидных пакетов: {len(packets)}")
-    
-    if not packets:
-        print("Не найдено ни одного пакета с заголовком 0xFA.")
-        print("Показываю первые 64 байта файла в HEX для анализа:")
-        print(raw[:64].hex(' ', 16))
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
+        print(f"Подключён к {SERIAL_PORT} на скорости {BAUDRATE}")
+    except serial.SerialException as e:
+        print(f"Ошибка открытия порта: {e}")
         return
-    
-    print("\n--- Расшифровка первых 5 пакетов ---")
-    for idx, pkt in enumerate(packets[:5]):
-        try:
-            parsed = parse_packet(pkt)
-            print(f"Пакет {idx}: {parsed}")
-        except Exception as e:
-            print(f"Пакет {idx}: ошибка распаковки - {e}")
-            print(f"  HEX: {pkt.hex(' ', 16)}")
-    
-    out_csv = filename.replace('.bin', '_parsed.csv')
-    with open(out_csv, 'w', newline='') as csvfile:
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f"lidar_polar_{timestamp}.csv"
+    with open(csv_filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        headers = []
-        for name, fmt in FIELDS:
-            size = struct.calcsize(fmt)
-            if size > 1 and 'H' in fmt:
-                count = size // 2
-                headers.extend([f"{name}_{j}" for j in range(count)])
-            else:
-                headers.append(name)
-        writer.writerow(headers)
-        
-        for pkt in packets:
-            try:
-                parsed = parse_packet(pkt)
-                row = []
-                for name, fmt in FIELDS:
-                    val = parsed[name]
-                    if isinstance(val, tuple):
-                        row.extend(val)
-                    else:
-                        row.append(val)
-                writer.writerow(row)
-            except:
-                continue
-    print(f"\nданные сохранены в {out_csv}")
+        writer.writerow(["Angle_deg", "Distance_mm", "Intensity"])
+        total_points = 0
+        print(f"Сохранение в {csv_filename} (нажмите Ctrl+C для остановки)")
+        try:
+            while True:
+                byte = ser.read(1)
+                if not byte:
+                    continue
+                if byte[0] == HEADER:
+                    packet = byte + ser.read(PACKET_SIZE - 1)
+                    if len(packet) == PACKET_SIZE:
+                        points = parse_packet(packet)
+                        for p in points:
+                            # Фильтр недостоверных расстояний (опционально)
+                            if 0 < p['dist'] < 12000:
+                                writer.writerow([f"{p['angle']:.2f}", p['dist'], p['intens']])
+                                total_points += 1
+                        if total_points % 200 == 0:
+                            print(f"Записано точек: {total_points}")
+        except KeyboardInterrupt:
+            print(f"\nОстановлено. Всего точек: {total_points}")
+        finally:
+            ser.close()
+    print(f"Данные сохранены в {csv_filename}")
 
 if __name__ == "__main__":
     main()
