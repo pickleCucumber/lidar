@@ -5,13 +5,13 @@ import csv
 import time
 from datetime import datetime
 
-SERIAL_PORT = '/dev/serial0'
+SERIAL_PORT = '/dev/ttyUSB0'
 BAUDRATE = 230400
 HEADER = 0x54
 PACKET_SIZE = 47          
 POINTS_PER_PACKET = 12
 
-# CRC8 таблица для LD06 (poly 0x4D, init 0x00)
+# CRC8 таблица 
 CRC_TABLE = [
     0x00, 0x4d, 0x9a, 0xd7, 0x79, 0x34, 0xe3, 0xae, 0xf2, 0xbf, 0x68, 0x25, 0x8b, 0xc6, 0x11, 0x5c,
     0xa9, 0xe4, 0x33, 0x7e, 0xd0, 0x9d, 0x4a, 0x07, 0x5b, 0x16, 0xc1, 0x8c, 0x22, 0x6f, 0xb8, 0xf5,
@@ -33,7 +33,6 @@ CRC_TABLE = [
 
 
 def calc_crc8(data: bytes) -> int:
-    """CRC8 по всему пакету, кроме последнего (crc) байта."""
     crc = 0
     for b in data:
         crc = CRC_TABLE[(crc ^ b) & 0xFF]
@@ -41,15 +40,11 @@ def calc_crc8(data: bytes) -> int:
 
 
 def parse_packet(packet):
-    """
-    Распаковывает пакет LD06 (47 байт).
-    Возвращает список словарей: [{'angle': float_deg, 'dist': int_mm, 'intens': int}, ...]
-    или [] если пакет не прошёл проверку.
-    """
+
     if packet[0] != HEADER or len(packet) != PACKET_SIZE:
         return []
 
-    # проверка контрольной суммы — отбрасываем всё, что рассинхронизировалось
+ 
     if calc_crc8(packet[:-1]) != packet[-1]:
         return []
 
@@ -84,14 +79,12 @@ def main():
         writer.writerow(["Angle_deg", "Distance_mm", "Intensity"])
         total_points = 0
         dropped_packets = 0
-        print(f"Сохранение в {csv_filename} (нажмите Ctrl+C для остановки)")
         try:
             while True:
                 byte = ser.read(1)
                 if not byte:
                     continue
                 if byte[0] == HEADER:
-                    # уже прочитан 1 байт (header), нужно ещё PACKET_SIZE - 1
                     rest = ser.read(PACKET_SIZE - 1)
                     packet = byte + rest
                     if len(packet) != PACKET_SIZE:
