@@ -5,7 +5,7 @@ import csv
 import time
 from datetime import datetime
 
-SERIAL_PORT = '/dev/serial0'
+SERIAL_PORT = '/dev/ttyUSB0'
 BAUDRATE = 230400
 HEADER = 0x54
 PACKET_SIZE = 47          
